@@ -4,8 +4,12 @@ import { storage } from "./storage";
 import { WebSocketServer, WebSocket } from "ws";
 import { type NormalizedLiquiditySnapshot, type WebSocketMessage, type Trade } from "@shared/schema";
 import axios from "axios";
+import yahooFinance from "yahoo-finance2";
 
+// Define the Alpha Vantage API key (as a fallback)
 const ALPHA_VANTAGE_API_KEY = process.env.ALPHA_VANTAGE_API_KEY || "";
+
+// We don't need API keys for Yahoo Finance!
 
 // Keep track of connected clients
 const clients = new Set<WebSocket>();
@@ -253,18 +257,77 @@ function simulateTrade(symbol: string, currentPrice: number): Trade {
   };
 }
 
-// Fetch all available data for a symbol - using only daily data since intraday requires premium
+// Fetch crypto data from Yahoo Finance
+async function fetchYahooFinanceData(symbol: string): Promise<NormalizedLiquiditySnapshot> {
+  try {
+    // Convert the symbol format (BTC/USD => BTC-USD)
+    const yahooSymbol = symbol.replace('/', '-');
+    
+    console.log(`Fetching Yahoo Finance data for ${symbol} (Yahoo symbol: ${yahooSymbol})`);
+    
+    // Use a cache key with the original symbol
+    const cacheKey = `yahoo-${symbol}`;
+    let cachedData = apiCache.get(cacheKey);
+    
+    if (cachedData && Date.now() - cachedData.timestamp < 30000) { // 30-second cache
+      return cachedData.data;
+    }
+    
+    // Fetch quote data from Yahoo Finance
+    const quoteData = await yahooFinance.quote(yahooSymbol);
+    
+    if (!quoteData) {
+      throw new Error(`No data available from Yahoo Finance for ${symbol}`);
+    }
+    
+    // Get relevant data from the response
+    const regularMarketPrice = quoteData.regularMarketPrice || 0;
+    const regularMarketVolume = quoteData.regularMarketVolume || 0;
+    const dayVolume = regularMarketVolume;
+    
+    // Calculate bid and ask prices (slightly offset from the regular market price)
+    const spreadFactor = 0.0005; // 0.05% spread
+    const bidPrice = regularMarketPrice * (1 - spreadFactor);
+    const askPrice = regularMarketPrice * (1 + spreadFactor);
+    
+    // Generate reasonable bid and ask sizes based on volume
+    const bidSize = dayVolume * 0.000001 * (0.5 + Math.random() * 0.5);
+    const askSize = dayVolume * 0.000001 * (0.5 + Math.random() * 0.5);
+    
+    // Create the snapshot
+    const snapshot: NormalizedLiquiditySnapshot = {
+      symbol,
+      timestamp: Date.now(),
+      bidPrice,
+      askPrice,
+      bidSize,
+      askSize,
+      volume24h: dayVolume,
+      source: 'yahoo-finance'
+    };
+    
+    // Cache the data
+    apiCache.set(cacheKey, { data: snapshot, timestamp: Date.now() });
+    
+    return snapshot;
+  } catch (error) {
+    console.error(`Error fetching Yahoo Finance data for ${symbol}:`, error);
+    throw error;
+  }
+}
+
+// Fetch all available data for a symbol - Using Yahoo Finance as the primary source
 async function fetchAllDataForSymbol(symbol: string): Promise<NormalizedLiquiditySnapshot> {
   try {
-    // Use only daily data since the intraday is a premium endpoint
-    const dailyData = await fetchAlphaVantageDailyData(symbol);
+    // Use Yahoo Finance for the data
+    const yahooData = await fetchYahooFinanceData(symbol);
     
-    // Generate simulated order book data
+    // Generate simulated order book data based on the Yahoo Finance price data
     const { bids, asks } = generateOrderBookData(
-      dailyData.bidPrice, 
-      dailyData.askPrice,
-      dailyData.bidSize,
-      dailyData.askSize
+      yahooData.bidPrice, 
+      yahooData.askPrice,
+      yahooData.bidSize,
+      yahooData.askSize
     );
     
     // Convert order book to our depth levels format
@@ -275,22 +338,51 @@ async function fetchAllDataForSymbol(symbol: string): Promise<NormalizedLiquidit
     
     // Add depth levels to the snapshot
     return {
-      ...dailyData,
+      ...yahooData,
       depthLevels
     };
   } catch (error) {
-    console.error(`Alpha Vantage data source failed for ${symbol}:`, error);
-    // Return a default snapshot with the error
-    return {
-      symbol,
-      timestamp: Date.now(),
-      bidPrice: 0,
-      askPrice: 0,
-      bidSize: 0,
-      askSize: 0,
-      volume24h: 0,
-      source: 'error'
-    };
+    console.error(`Yahoo Finance data source failed for ${symbol}:`, error);
+    
+    try {
+      // Fall back to Alpha Vantage if Yahoo Finance fails
+      console.log(`Falling back to Alpha Vantage for ${symbol}`);
+      const dailyData = await fetchAlphaVantageDailyData(symbol);
+      
+      // Generate simulated order book data
+      const { bids, asks } = generateOrderBookData(
+        dailyData.bidPrice, 
+        dailyData.askPrice,
+        dailyData.bidSize,
+        dailyData.askSize
+      );
+      
+      // Convert order book to our depth levels format
+      const depthLevels = {
+        bids: bids.map(([price, size]) => ({ price: parseFloat(price.toString()), size: parseFloat(size.toString()) })),
+        asks: asks.map(([price, size]) => ({ price: parseFloat(price.toString()), size: parseFloat(size.toString()) }))
+      };
+      
+      // Add depth levels to the snapshot
+      return {
+        ...dailyData,
+        depthLevels
+      };
+    } catch (secondError) {
+      console.error(`All data sources failed for ${symbol}:`, secondError);
+      
+      // Return a default snapshot with the error
+      return {
+        symbol,
+        timestamp: Date.now(),
+        bidPrice: 0,
+        askPrice: 0,
+        bidSize: 0,
+        askSize: 0,
+        volume24h: 0,
+        source: 'error'
+      };
+    }
   }
 }
 
