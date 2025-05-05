@@ -1,0 +1,101 @@
+
+Overview You are an autonomous development agent charged with architecting and populating a cutting-edge, interactive web application for real-time liquidity monitoring across crypto. Your deliverable must be:
+1. Modern & Slick: a clean, intuitive UI/UX built with a popular React-based framework.
+2. Easy to Deploy: containerized or serverless, with infrastructure-as-code instructions.
+3. Data-Driven: ingestion, normalization, and display of live market metrics—bid/ask spreads, traded volumes, order-book depth, etc.
+
+1. Project Goals & Success Criteria
+1. Real-Time Liquidity Dashboard
+    * Display key liquidity indicators (bid/ask spread, 24h volume, depth at top N levels) for each symbol.
+    * Support comparison views.
+2. Scalability & Maintainability
+    * Modular React components with state management (e.g. Redux, Zustand).
+    * Automated CI/CD pipelines (e.g. GitHub Actions) and Docker-based deployment.
+3. Extensibility
+    * Plugin architecture for adding new data sources or indicators.
+    * Well-documented code and API integration layers.
+
+2. Technical Architecture
+Layer	Technology Choices	Responsibilities
+Frontend	React + TypeScript, Tailwind CSS, Vite	Interactive charts (Recharts or D3), responsive layouts, dark/light mode
+Data Layer	Node.js (Express or Fastify) or Next.js API	Fetch & cache market data, normalize payloads, REST/gRPC endpoints
+State Management	Redux Toolkit or Zustand	Central store for market snapshots and UI flags
+Storage & Cache	Redis for short-term caching; MongoDB/TimescaleDB optional	Persist historical snapshots, serve fast reads
+Deployment	Docker Compose / Kubernetes / Vercel	Automated builds, rolling updates, health checks
+3. Step-by-Step Agent Instructions
+3.1 Initialize Project Skeleton
+1. Repository Setup
+    * Initialize Git with a clear branching strategy (main/dev).
+    * Configure package.json with linting (ESLint), formatting (Prettier), and test framework (Jest).
+2. Framework Bootstrapping
+    * Create a React + Vite project with TypeScript.
+    * Scaffold core layout: header, sidebar, main content area, footer.
+3. Styling
+    * Integrate Tailwind CSS.
+    * Define design tokens (colors, typography, spacing).
+3.2 API Integration Module
+1. Environment Management
+    * Create a .env.example listing: VITE_FINNHUB_API_KEY=d081c5hr01qp8st7214gd081c5hr01qp8st72150  
+    * VITE_TWELVE_API_KEY=fa7f6bbac1984dbaa825219581529bc0  
+    * VITE_FMP_API_KEY=naDhlZ81fiI56TUuDmeu6OoTFPSY6mxV  
+    * VITE_POLYGON_API_KEY=sWPILlpWBraEYLc68f22Lat9qwSwTfQH  
+    * 
+    * Ensure keys loaded via import.meta.env.
+2. Data Fetchers (one per service)
+    * Finnhub: REST wrapper for /quote, /orderbook, /stock/symbol.
+    * Twelve Data: WebSocket client for streaming bid/ask updates.
+    * FMP: Historical volume and depth endpoints.
+    * Polygon: Order-book snapshots and trades.
+3. Normalization
+    * For each symbol and exchange, produce a unified type: interface LiquiditySnapshot {
+    *   symbol: string;
+    *   timestamp: number;
+    *   bidPrice: number;
+    *   askPrice: number;
+    *   bidSize: number;
+    *   askSize: number;
+    *   volume24h: number;
+    *   depthLevels: Array<{ price: number; size: number }>;
+    * }
+    * 
+3.3 Data Processing & Caching
+1. In-Memory Cache
+    * Use Redis to store the latest snapshot per symbol with a TTL of 5 seconds.
+2. Historical Persistence (optional)
+    * Batch-insert snapshots into TimescaleDB every minute for charting historical liquidity trends.
+3.4 Frontend Components
+1. Dashboard Layout
+    * Symbol Selector: dropdown or search box to add/remove tickers.
+    * Summary Cards: current bid/ask spread, mid-price, 24h volume.
+    * Order-Book Depth Chart: real-time depth visualization.
+    * Spread & Volume Graphs: time-series line charts.
+2. Interactivity & Reactivity
+    * Poll or subscribe over WebSockets for live updates.
+    * Highlight anomalies (e.g. sudden spread widening) with visual cues.
+3. Responsive Design
+    * Ensure usability on desktop and tablet; mobile priority support optional.
+3.5 Deployment & DevOps
+1. Docker
+    * Define Dockerfile for API and Dockerfile.frontend for UI.
+    * Compose in docker-compose.yml with Redis and database services.
+2. CI/CD
+    * GitHub Actions workflow:
+        * On push to dev: build and push Docker images to registry.
+        * On merge to main: deploy to staging/production.
+3. Monitoring & Alerts
+    * Integrate health-check endpoints.
+    * Use Prometheus + Grafana or a managed alternative to track API latency and error rates.
+
+4. Optional Enhancements
+* Algorithmic Alerts: notify when spread exceeds a threshold or volume drops below a floor.
+* Heatmaps: cross-exchange liquidity imbalance visuals.
+* User Profiles & Permissions: per-user watchlists, API key management.
+* Theming & Customization: allow users to define custom indicators or alert rules.
+
+5. Assumptions & Constraints
+* You have valid API keys for all services.
+* Rate limits are managed via exponential backoff and caching.
+* The initial MVP will focus on a fixed universe of 50 symbols; scalability will follow.
+* Security best practices (HTTPS, CORS, environment isolation) must be enforced.
+
+With these instructions, you can autonomously scaffold, implement, and deploy a fully featured, high-performance liquidity-tracking web application.
