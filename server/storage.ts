@@ -25,9 +25,11 @@ export class MemStorage implements IStorage {
     this.users = new Map();
     this.liquiditySnapshots = new Map();
     this.tradeHistory = new Map();
-    // Define crypto symbols that work well with Alpha Vantage
+    // Define crypto symbols that work with Yahoo Finance
     this.symbols = [
-      "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD", "BCH/USD"
+      "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD", "BCH/USD",
+      "ADA/USD", "DOT/USD", "SOL/USD", "DOGE/USD", "LINK/USD",
+      "UNI/USD", "MATIC/USD", "AVAX/USD", "SHIB/USD", "ATOM/USD"
     ];
     this.currentId = 1;
   }

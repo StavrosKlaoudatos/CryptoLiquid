@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { WebSocketServer, WebSocket } from "ws";
-import { type NormalizedLiquiditySnapshot, type WebSocketMessage, type Trade } from "@shared/schema";
+import { type NormalizedLiquiditySnapshot, type WebSocketMessage, type Trade, type DepthLevel } from "@shared/schema";
 import axios from "axios";
 import yahooFinance from "yahoo-finance2";
 
@@ -257,6 +257,129 @@ function simulateTrade(symbol: string, currentPrice: number): Trade {
   };
 }
 
+/**
+ * Calculate liquidity score and market metrics
+ * 
+ * @param price - Current price of the asset
+ * @param bidPrice - Current bid price
+ * @param askPrice - Current ask price
+ * @param bidSize - Current bid size
+ * @param askSize - Current ask size
+ * @param volume24h - 24 hour volume
+ * @param marketCap - Market cap of the asset (if available)
+ * @param depthLevels - Order book depth levels
+ */
+function calculateLiquidityMetrics(
+  price: number,
+  bidPrice: number,
+  askPrice: number,
+  bidSize: number,
+  askSize: number,
+  volume24h: number,
+  marketCap: number | null,
+  depthLevels?: { bids: DepthLevel[]; asks: DepthLevel[] }
+) {
+  // Calculate spread percentage
+  const spread = askPrice - bidPrice;
+  const spreadPercentage = price > 0 ? (spread / price) * 100 : 0;
+  
+  // Calculate market depth ratio (bid depth vs ask depth)
+  const marketDepthRatio = askSize > 0 ? bidSize / askSize : 1;
+  
+  // Calculate volume to market cap ratio (if market cap is available)
+  const volumeToMcapRatio = marketCap && marketCap > 0 ? (volume24h / marketCap) * 100 : undefined;
+  
+  // Calculate slippage impact for different order sizes
+  let slippageImpact = {
+    small: 0,
+    medium: 0,
+    large: 0
+  };
+  
+  // If we have depth levels, calculate more accurate slippage
+  if (depthLevels && depthLevels.bids.length > 0 && depthLevels.asks.length > 0) {
+    // Small order = 0.1% of daily volume
+    // Medium order = 0.5% of daily volume
+    // Large order = 1% of daily volume
+    const smallOrderSize = volume24h * 0.001;
+    const mediumOrderSize = volume24h * 0.005;
+    const largeOrderSize = volume24h * 0.01;
+    
+    // Calculate slippage for buy orders (using ask side)
+    const calculateBuySlippage = (orderSize: number): number => {
+      let remainingSize = orderSize;
+      let totalCost = 0;
+      
+      for (let i = 0; i < depthLevels.asks.length && remainingSize > 0; i++) {
+        const level = depthLevels.asks[i];
+        const levelPrice = level.price;
+        const levelSize = level.size;
+        
+        const sizeToTake = Math.min(remainingSize, levelSize);
+        totalCost += sizeToTake * levelPrice;
+        remainingSize -= sizeToTake;
+      }
+      
+      // If all the levels aren't enough, use the last price for remaining size
+      if (remainingSize > 0 && depthLevels.asks.length > 0) {
+        const lastPrice = depthLevels.asks[depthLevels.asks.length - 1].price;
+        totalCost += remainingSize * lastPrice;
+      }
+      
+      const averagePrice = totalCost / orderSize;
+      // Calculate slippage as percentage above current ask price
+      return askPrice > 0 ? ((averagePrice / askPrice) - 1) * 100 : 0;
+    };
+    
+    // Calculate slippage
+    slippageImpact = {
+      small: calculateBuySlippage(smallOrderSize),
+      medium: calculateBuySlippage(mediumOrderSize),
+      large: calculateBuySlippage(largeOrderSize)
+    };
+  } else {
+    // Simple estimation based on spread and volume
+    slippageImpact = {
+      small: spreadPercentage * 0.5,
+      medium: spreadPercentage * 1.5,
+      large: spreadPercentage * 3
+    };
+  }
+  
+  // Calculate final liquidity score (0-100)
+  // Lower spread, higher volume, and balanced depth are better
+  let liquidityScore = 0;
+  
+  // Spread component (lower is better) - max 40 points
+  const spreadScore = Math.max(0, 40 - (spreadPercentage * 100));
+  
+  // Volume component (higher is better) - max 40 points
+  let volumeScore = 0;
+  if (marketCap && marketCap > 0) {
+    // Use volume to market cap ratio if available
+    volumeScore = Math.min(40, (volume24h / marketCap) * 40000);
+  } else {
+    // Fallback scoring based on absolute volume
+    volumeScore = Math.min(40, Math.log10(volume24h) * 4);
+  }
+  
+  // Depth balance component (closer to 1.0 is better) - max 20 points
+  const depthBalanceScore = 20 - (Math.abs(1 - marketDepthRatio) * 10);
+  
+  // Final score calculation
+  liquidityScore = Math.round(
+    Math.max(0, Math.min(100, spreadScore + volumeScore + depthBalanceScore))
+  );
+  
+  return {
+    liquidityScore,
+    marketDepthRatio,
+    volumeToMcapRatio,
+    spreadPercentage,
+    slippageImpact
+  };
+}
+
 // Fetch crypto data from Yahoo Finance
 async function fetchYahooFinanceData(symbol: string): Promise<NormalizedLiquiditySnapshot> {
   try {
@@ -284,6 +407,7 @@ async function fetchYahooFinanceData(symbol: string): Promise<NormalizedLiquidit
     const regularMarketPrice = quoteData.regularMarketPrice || 0;
     const regularMarketVolume = quoteData.regularMarketVolume || 0;
     const dayVolume = regularMarketVolume;
+    const marketCap = quoteData.marketCap || null;
     
     // Calculate bid and ask prices (slightly offset from the regular market price)
     const spreadFactor = 0.0005; // 0.05% spread
@@ -321,6 +445,7 @@ async function fetchAllDataForSymbol(symbol: string): Promise<NormalizedLiquidit
   try {
     // Use Yahoo Finance for the data
     const yahooData = await fetchYahooFinanceData(symbol);
+    const avgPrice = (yahooData.bidPrice + yahooData.askPrice) / 2;
     
     // Generate simulated order book data based on the Yahoo Finance price data
     const { bids, asks } = generateOrderBookData(
@@ -336,10 +461,41 @@ async function fetchAllDataForSymbol(symbol: string): Promise<NormalizedLiquidit
       asks: asks.map(([price, size]) => ({ price: parseFloat(price.toString()), size: parseFloat(size.toString()) }))
     };
     
-    // Add depth levels to the snapshot
+    // Get market cap from yahoo data or estimate it
+    let marketCap: number | undefined = undefined;
+    
+    // Try to fetch quote data to get market cap if available
+    try {
+      const yahooSymbol = symbol.replace('/', '-');
+      const quoteData = await yahooFinance.quote(yahooSymbol);
+      if (quoteData && quoteData.marketCap) {
+        marketCap = quoteData.marketCap;
+      }
+    } catch (e) {
+      console.warn(`Could not fetch market cap data for ${symbol}:`, e);
+    }
+    
+    // Calculate liquidity metrics
+    const metrics = calculateLiquidityMetrics(
+      avgPrice,
+      yahooData.bidPrice,
+      yahooData.askPrice,
+      yahooData.bidSize,
+      yahooData.askSize,
+      yahooData.volume24h,
+      marketCap,
+      depthLevels
+    );
+    
+    // Add depth levels and metrics to the snapshot
     return {
       ...yahooData,
-      depthLevels
+      depthLevels,
+      liquidityScore: metrics.liquidityScore,
+      marketDepthRatio: metrics.marketDepthRatio,
+      volumeToMcapRatio: metrics.volumeToMcapRatio,
+      spreadPercentage: metrics.spreadPercentage,
+      slippageImpact: metrics.slippageImpact
     };
   } catch (error) {
     console.error(`Yahoo Finance data source failed for ${symbol}:`, error);
@@ -348,6 +504,7 @@ async function fetchAllDataForSymbol(symbol: string): Promise<NormalizedLiquidit
       // Fall back to Alpha Vantage if Yahoo Finance fails
       console.log(`Falling back to Alpha Vantage for ${symbol}`);
       const dailyData = await fetchAlphaVantageDailyData(symbol);
+      const avgPrice = (dailyData.bidPrice + dailyData.askPrice) / 2;
       
       // Generate simulated order book data
       const { bids, asks } = generateOrderBookData(
@@ -363,10 +520,27 @@ async function fetchAllDataForSymbol(symbol: string): Promise<NormalizedLiquidit
         asks: asks.map(([price, size]) => ({ price: parseFloat(price.toString()), size: parseFloat(size.toString()) }))
       };
       
-      // Add depth levels to the snapshot
+      // Calculate liquidity metrics
+      const metrics = calculateLiquidityMetrics(
+        avgPrice,
+        dailyData.bidPrice,
+        dailyData.askPrice,
+        dailyData.bidSize,
+        dailyData.askSize,
+        dailyData.volume24h,
+        undefined, // No market cap data available from Alpha Vantage
+        depthLevels
+      );
+      
+      // Add depth levels and metrics to the snapshot
       return {
         ...dailyData,
-        depthLevels
+        depthLevels,
+        liquidityScore: metrics.liquidityScore,
+        marketDepthRatio: metrics.marketDepthRatio,
+        volumeToMcapRatio: metrics.volumeToMcapRatio,
+        spreadPercentage: metrics.spreadPercentage,
+        slippageImpact: metrics.slippageImpact
       };
     } catch (secondError) {
       console.error(`All data sources failed for ${symbol}:`, secondError);
@@ -380,7 +554,15 @@ async function fetchAllDataForSymbol(symbol: string): Promise<NormalizedLiquidit
         bidSize: 0,
         askSize: 0,
         volume24h: 0,
-        source: 'error'
+        source: 'error',
+        liquidityScore: 0,
+        marketDepthRatio: 1,
+        spreadPercentage: 0,
+        slippageImpact: {
+          small: 0,
+          medium: 0,
+          large: 0
+        }
       };
     }
   }

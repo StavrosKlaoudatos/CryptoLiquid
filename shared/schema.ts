@@ -83,6 +83,15 @@ export interface NormalizedLiquiditySnapshot {
     asks: DepthLevel[];
   };
   source: string; // Which API this came from
+  liquidityScore?: number; // 0-100 score based on spread, depth, and volume
+  marketDepthRatio?: number; // Ratio of depth on bid vs ask side
+  volumeToMcapRatio?: number; // Volume to Market Cap ratio
+  spreadPercentage?: number; // Spread as a percentage of price
+  slippageImpact?: { // Estimated price impact for different order sizes
+    small: number;  // 0.1% of 24h volume
+    medium: number; // 0.5% of 24h volume
+    large: number;  // 1% of 24h volume
+  };
 }
 
 export interface Trade {
