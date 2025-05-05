@@ -276,7 +276,7 @@ function calculateLiquidityMetrics(
   bidSize: number,
   askSize: number,
   volume24h: number,
-  marketCap: number | null,
+  marketCap: number | undefined,
   depthLevels?: { bids: DepthLevel[]; asks: DepthLevel[] }
 ) {
   // Calculate spread percentage
@@ -397,7 +397,24 @@ async function fetchYahooFinanceData(symbol: string): Promise<NormalizedLiquidit
     }
     
     // Fetch quote data from Yahoo Finance
-    const quoteData = await yahooFinance.quote(yahooSymbol);
+    let quoteData;
+    try {
+      quoteData = await yahooFinance.quote(yahooSymbol);
+    } catch (error: any) {
+      // Handle schema validation errors from Yahoo Finance
+      if (error && error.name === 'TransformDecodeCheckError') {
+        console.warn(`Yahoo Finance schema validation error for ${symbol}, attempting to extract data from raw response`);
+        
+        // Try to get the raw response data even if validation failed
+        if (error.value && Array.isArray(error.value) && error.value.length > 0) {
+          quoteData = error.value[0];
+        } else {
+          throw new Error(`Unable to extract data from Yahoo Finance response for ${symbol}`);
+        }
+      } else {
+        throw error;
+      }
+    }
     
     if (!quoteData) {
       throw new Error(`No data available from Yahoo Finance for ${symbol}`);
@@ -407,7 +424,7 @@ async function fetchYahooFinanceData(symbol: string): Promise<NormalizedLiquidit
     const regularMarketPrice = quoteData.regularMarketPrice || 0;
     const regularMarketVolume = quoteData.regularMarketVolume || 0;
     const dayVolume = regularMarketVolume;
-    const marketCap = quoteData.marketCap || null;
+    const marketCap = quoteData.marketCap ? Number(quoteData.marketCap) : undefined;
     
     // Calculate bid and ask prices (slightly offset from the regular market price)
     const spreadFactor = 0.0005; // 0.05% spread
@@ -467,9 +484,21 @@ async function fetchAllDataForSymbol(symbol: string): Promise<NormalizedLiquidit
     // Try to fetch quote data to get market cap if available
     try {
       const yahooSymbol = symbol.replace('/', '-');
-      const quoteData = await yahooFinance.quote(yahooSymbol);
+      let quoteData;
+      try {
+        quoteData = await yahooFinance.quote(yahooSymbol);
+      } catch (error: any) {
+        // Handle schema validation errors from Yahoo Finance
+        if (error && error.name === 'TransformDecodeCheckError') {
+          if (error.value && Array.isArray(error.value) && error.value.length > 0) {
+            quoteData = error.value[0];
+          }
+        } else {
+          throw error;
+        }
+      }
       if (quoteData && quoteData.marketCap) {
-        marketCap = quoteData.marketCap;
+        marketCap = Number(quoteData.marketCap);
       }
     } catch (e) {
       console.warn(`Could not fetch market cap data for ${symbol}:`, e);
@@ -645,6 +674,128 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(trades);
     } catch (error) {
       res.status(500).json({ message: 'Error fetching trades' });
+    }
+  });
+  
+  // Endpoint for getting market liquidity comparison
+  app.get('/api/market/comparison', async (req, res) => {
+    try {
+      const symbols = await storage.getSymbols();
+      const allSnapshots: NormalizedLiquiditySnapshot[] = [];
+      
+      // Fetch data for all symbols
+      for (const symbol of symbols) {
+        let snapshot = await storage.getLiquiditySnapshot(symbol);
+        
+        // If no snapshot is available, skip this symbol
+        if (!snapshot || snapshot.source === 'error') {
+          continue;
+        }
+        
+        allSnapshots.push(snapshot);
+      }
+      
+      // Sort snapshots by liquidity score (if available)
+      const sortedSnapshots = allSnapshots
+        .filter(s => s.liquidityScore !== undefined)
+        .sort((a, b) => {
+          // Default to 0 if liquidityScore is undefined
+          const scoreA = a.liquidityScore || 0;
+          const scoreB = b.liquidityScore || 0;
+          return scoreB - scoreA; // Descending order
+        });
+      
+      // Create summary data
+      const comparisonData = sortedSnapshots.map(snapshot => {
+        return {
+          symbol: snapshot.symbol,
+          currentPrice: (snapshot.bidPrice + snapshot.askPrice) / 2,
+          liquidityScore: snapshot.liquidityScore,
+          bidPrice: snapshot.bidPrice,
+          askPrice: snapshot.askPrice,
+          volume24h: snapshot.volume24h,
+          spreadPercentage: snapshot.spreadPercentage,
+          marketDepthRatio: snapshot.marketDepthRatio,
+          slippageImpact: snapshot.slippageImpact
+        };
+      });
+      
+      res.json(comparisonData);
+    } catch (error) {
+      console.error('Error generating market comparison:', error);
+      res.status(500).json({ message: 'Error generating market comparison' });
+    }
+  });
+  
+  // Endpoint for getting market depth analysis for a specific symbol
+  app.get('/api/market/depth/:symbol', async (req, res) => {
+    try {
+      const symbol = req.params.symbol;
+      let snapshot = await storage.getLiquiditySnapshot(symbol);
+      
+      // If no snapshot is available, fetch it
+      if (!snapshot) {
+        snapshot = await fetchAllDataForSymbol(symbol);
+        await storage.saveLiquiditySnapshot(snapshot);
+      }
+      
+      // Check if we have depth levels
+      if (!snapshot.depthLevels) {
+        return res.status(404).json({ message: 'No market depth data available for this symbol' });
+      }
+      
+      // Calculate cumulative totals for bid and ask sides
+      const bids = snapshot.depthLevels.bids.map((level, index, array) => {
+        // Calculate the running total to this level
+        const total = array
+          .slice(0, index + 1)
+          .reduce((sum, l) => sum + l.size, 0);
+        
+        return {
+          ...level,
+          total,
+          value: level.price * level.size
+        };
+      });
+      
+      const asks = snapshot.depthLevels.asks.map((level, index, array) => {
+        // Calculate the running total to this level
+        const total = array
+          .slice(0, index + 1)
+          .reduce((sum, l) => sum + l.size, 0);
+        
+        return {
+          ...level,
+          total,
+          value: level.price * level.size
+        };
+      });
+      
+      // Calculate statistical measures
+      const bidSum = bids.reduce((sum, level) => sum + level.size, 0);
+      const askSum = asks.reduce((sum, level) => sum + level.size, 0);
+      const totalDepth = bidSum + askSum;
+      
+      const depthAnalysis = {
+        symbol,
+        timestamp: snapshot.timestamp,
+        currentPrice: (snapshot.bidPrice + snapshot.askPrice) / 2,
+        spreadPercentage: snapshot.spreadPercentage,
+        bidSum,
+        askSum,
+        totalDepth,
+        bidToAskRatio: bidSum / askSum,
+        valueImbalance: bids.reduce((sum, level) => sum + level.value, 0) / 
+                      asks.reduce((sum, level) => sum + level.value, 0),
+        slippageImpact: snapshot.slippageImpact,
+        bids,
+        asks
+      };
+      
+      res.json(depthAnalysis);
+    } catch (error) {
+      console.error(`Error generating market depth analysis for ${req.params.symbol}:`, error);
+      res.status(500).json({ message: 'Error generating market depth analysis' });
     }
   });
 
